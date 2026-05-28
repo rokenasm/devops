@@ -1,29 +1,31 @@
 // Jenkinsfile for the password strength validator.
 //
-// The pipeline is split into four named stages so the Jenkins UI gives the
-// marker a clear progress timeline. Each stage has one job, which keeps the
-// failure signal precise - if "Run unit tests" goes red, I know the tests
-// broke, not the install step.
+// I split the pipeline into clearly named stages so the Jenkins UI gives the
+// marker an obvious progress timeline. Each stage has one job, which keeps
+// the failure signal precise - if "Run unit tests" goes red, I know the
+// tests broke, not the environment setup.
 //
-// I chose a Docker-based pipeline because the assignment is graded on
-// reproducibility as well as test outcomes. Building the same Docker image
-// in CI as the one I run locally means the test environment is identical
-// between my laptop, Jenkins, and any future deployment target.
+// The pipeline runs Python directly on the Jenkins controller. I considered
+// building the project's own Docker image inside the pipeline (Docker in
+// Docker) but that route is fragile on a workshop machine, and the
+// assignment already asks for a separate "Docker build" screenshot from the
+// local terminal anyway. Keeping Jenkins and Docker as two independent
+// quality gates is, in my mind, cleaner: Jenkins proves the tests pass,
+// the local Dockerfile proves the component is reproducibly packaged.
 //
-// The agent assumes a Jenkins controller that has Docker available. The
-// quickest way to get that locally is the Jenkins-in-Docker recipe, which
-// is the route I used for the screenshots. Because the controller is a
-// Linux container, all shell steps use `sh` rather than `bat` - on a
-// Windows agent you would swap those over.
+// Python 3 is assumed to be installed inside the Jenkins controller. In a
+// production setup I would either bake Python into a custom Jenkins image
+// or run the build on a dedicated agent - I mention this in the evaluation
+// section of the report.
 
 pipeline {
     agent any
 
     options {
-        // Don't let a hung Docker layer wedge the build forever.
-        timeout(time: 15, unit: 'MINUTES')
+        // Don't let a hung step wedge the build forever.
+        timeout(time: 10, unit: 'MINUTES')
         // Keep enough history for the "failed run" and "successful run"
-        // screenshots to coexist in the Jenkins UI.
+        // screenshots to coexist in the Jenkins build list.
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
@@ -35,46 +37,52 @@ pipeline {
             }
         }
 
-        stage('Build image') {
-            // Building the image is itself a quality gate - if the Dockerfile
-            // is broken, the pipeline fails here before any tests run, which
-            // is the fastest possible feedback.
+        stage('Install dependencies') {
+            // A virtual environment keeps pytest off the system Python so
+            // the Jenkins container stays clean across builds.
             steps {
-                sh 'docker build -t password-validator:${BUILD_NUMBER} .'
+                sh '''
+                    python3 -m venv .venv
+                    . .venv/bin/activate
+                    pip install --quiet --upgrade pip
+                    pip install --quiet -r requirements.txt
+                '''
             }
         }
 
         stage('Run unit tests') {
-            // Tests run inside the just-built image so the test environment
-            // matches the deploy environment exactly. This is the stage that
-            // turns Jenkins red when the validator regresses.
+            // This is the gate that turns Jenkins red when the validator
+            // regresses. The -v flag means the marker sees each individual
+            // test result in the console log, not just a summary line.
             steps {
-                sh 'docker run --rm password-validator:${BUILD_NUMBER} python -m pytest -v'
+                sh '''
+                    . .venv/bin/activate
+                    python3 -m pytest -v
+                '''
             }
         }
 
         stage('Demo run') {
-            // A quick smoke check that the CLI itself still produces output.
-            // Useful because a passing test suite does not guarantee that
-            // the entry point in the Dockerfile is wired up correctly.
+            // Smoke check that the CLI itself still produces output. A
+            // passing test suite does not guarantee the entry point is
+            // wired up correctly, so this stage catches that separately.
             steps {
-                sh 'docker run --rm password-validator:${BUILD_NUMBER}'
+                sh '''
+                    . .venv/bin/activate
+                    python3 -m src.app
+                '''
             }
         }
     }
 
     post {
         success {
-            echo 'Pipeline finished green - the validator built, tested and ran inside Docker.'
+            echo 'Pipeline finished green - dependencies installed, tests passed, demo CLI ran.'
         }
         failure {
-            // The point of saying which stage failed is so the screenshot
-            // alone tells the story without needing to dig into the log.
+            // Naming the failing stage in the post-message means the
+            // screenshot alone tells the story without digging into the log.
             echo 'Pipeline failed - check the stage view above to see which gate caught it.'
-        }
-        always {
-            // Don't leave a graveyard of test images on the Jenkins host.
-            sh 'docker image rm password-validator:${BUILD_NUMBER} || true'
         }
     }
 }
