@@ -171,7 +171,7 @@ def check_password(password, policy: Policy | None = None) -> dict:
             "reasons": reasons,
         }
 
-    if score >= 400:
+    if score >= 40:
         band = "strong"
     elif score >= 28:
         band = "medium"
